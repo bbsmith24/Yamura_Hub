@@ -5,7 +5,7 @@
 //
 #include <esp_now.h>
 #include <WiFi.h>
-#include "BluetoothSerial.h"
+//#include "BluetoothSerial.h"
 #include "FS.h"
 #include "SD.h"
 
@@ -23,11 +23,19 @@ struct IOLeaf
   int16_t a2dValues[4];     // 8 bytes, 2 per a2d channel
   int16_t digitalValue;     // 1 byte, 1 bit per digital channel
 } ioData;
-
-BluetoothSerial SerialBT;
-String btName = "XGPS160-45E134";
-char *btPin = "1234"; //<- standard pin would be provided by default
-bool btConnected;
+//
+struct GPSLeaf
+{
+  char leafType;            //  1 byte  - type, in this case 'G' for GPS
+  unsigned long timeStamp;  //  4 bytes - micros() value of sample
+  char nmeaTime[15];        // 10 bytes of nmea time string in form hhmmss.sss
+  char gpsLatitude[15];       //  9 bytes of nmea latitude in form ddmm.mmmm              
+  char gpsLongitude[15];      // 10 bytes of nmea longitude in form dddmm.mmmm              
+} gpsData;
+//BluetoothSerial SerialBT;
+//String btName = "XGPS160-45E134";
+//char *btPin = "1234"; //<- standard pin would be provided by default
+//bool btConnected;
 
 void setup()
 {
@@ -44,14 +52,13 @@ void setup()
   // register for receive callback to get the received packet
   esp_now_register_recv_cb(OnDataRecv);
 
- // connect(address) is fast (upto 10 secs max), connect(name) is slow (upto 30 secs max) as it needs
+  // connect(address) is fast (upto 10 secs max), connect(name) is slow (upto 30 secs max) as it needs
   // to resolve name to address first, but it allows to connect to different devices with the same name.
   // Set CoreDebugLevel to Info to view devices bluetooth address and device names
-  Serial.print("Attempt to connect to "); Serial.println(btName);
-
+  // Serial.print("Attempt to connect to "); Serial.println(btName);
+/*
   SerialBT.begin("ESP32test", true); 
   btConnected = SerialBT.connect(btName);
-  
   if(btConnected) 
   {
     Serial.println("Connected Succesfully!");
@@ -70,10 +77,12 @@ void setup()
   }
   // this would reconnect to the name(will use address, if resolved) or address used with connect(name/address).
   SerialBT.connect();
+*/
 }
 
 void loop()
 {
+  /*
   if(SerialBT.available() > 0)
   {
     String gpsRecieved = "";
@@ -102,6 +111,7 @@ void loop()
       //LogPrint(gpsRecieved);
     }
   }
+  */
 }
 //
 //
@@ -165,6 +175,18 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
         Serial.print(ioData.a2dValues[0]); Serial.print(" ");
       }
       Serial.print(" digital "); Serial.println(ioData.digitalValue, BIN);
+      break;
+    case 'G':
+  //unsigned long timeStamp;  //  4 bytes - micros() value of sample
+  //char nmeaTime[15];        // 10 bytes of nmea time string in form hhmmss.sss
+  //char gpsLatitude[15];       //  9 bytes of nmea latitude in form ddmm.mmmm              
+  //char gpsLongitude[15];      // 10 bytes of nmea longitude in form dddmm.mmmm              
+    
+      memcpy(&gpsData, data, sizeof(gpsData));
+      Serial.print("Time "); Serial.print(gpsData.timeStamp); Serial.print(" ");
+      Serial.print(" nmeaTime "); Serial.print(gpsData.nmeaTime); Serial.print(" ");
+      Serial.print(" long "); Serial.print(gpsData.gpsLatitude); Serial.print(" ");
+      Serial.print(" lat "); Serial.println(gpsData.gpsLongitude);
       break;
     
     default:
