@@ -32,6 +32,17 @@ struct GPSLeaf
   char gpsLatitude[15];       //  9 bytes of nmea latitude in form ddmm.mmmm              
   char gpsLongitude[15];      // 10 bytes of nmea longitude in form dddmm.mmmm              
 } gpsData;
+//
+struct HubTimeStamp
+{
+  char msgType;
+  unsigned long timeStamp;  // 4 bytes - millis() value of sample
+};
+union HubTimeStampPacket
+{
+  HubTimeStamp hubMsg;
+  uint8_t timeStamp[5];
+} hubTS;
 //BluetoothSerial SerialBT;
 //String btName = "XGPS160-45E134";
 //char *btPin = "1234"; //<- standard pin would be provided by default
@@ -132,27 +143,25 @@ void InitESPNow()
     ESP.restart();
   }
 }
-// callback when data is sent from Master to Slave
+// callback when data is sent to leaf
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
-           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-  Serial.print("Last Packet Sent to: "); Serial.println(macStr);
-  Serial.print("Last Packet Send Status: "); Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  if(status != ESP_NOW_SEND_SUCCESS)
+  {
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
+             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+    Serial.print("Last Packet Sent to: "); Serial.println(macStr);
+    Serial.print("Last Packet Send Status: "); Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  }
 }
 //
+// callback when data is received
 //
-//
-union DataRecieved
-{
-  unsigned long timeStamp;
-  char  timeStampBytes[4];
-} dataRecv;
-
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
 {
-  Serial.print("Recv from: ");
+  Serial.print(micros());
+  Serial.print(" Recv from: ");
   for(int idx = 0; idx < 6; idx++)
   {
     Serial.print(mac_addr[idx], HEX);Serial.print(":");
@@ -160,6 +169,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
   Serial.print(" ");
   switch(data[0])
   {
+    // accelerometer leaf data
     case 'A':
       memcpy(&accelData, data, sizeof(accelData));
       Serial.print("Time "); Serial.print(accelData.timeStamp); Serial.print(" ");
@@ -167,6 +177,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       Serial.print(accelData.values[1]); Serial.print(" ");
       Serial.println(accelData.values[2]);
       break;
+    // digital/analog IO leaf data
     case 'I':
       memcpy(&ioData, data, sizeof(ioData));
       Serial.print("Time "); Serial.print(ioData.timeStamp); Serial.print(" A2D ");
@@ -176,21 +187,47 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       }
       Serial.print(" digital "); Serial.println(ioData.digitalValue, BIN);
       break;
+    // GPS leaf data
     case 'G':
-  //unsigned long timeStamp;  //  4 bytes - micros() value of sample
-  //char nmeaTime[15];        // 10 bytes of nmea time string in form hhmmss.sss
-  //char gpsLatitude[15];       //  9 bytes of nmea latitude in form ddmm.mmmm              
-  //char gpsLongitude[15];      // 10 bytes of nmea longitude in form dddmm.mmmm              
-    
       memcpy(&gpsData, data, sizeof(gpsData));
       Serial.print("Time "); Serial.print(gpsData.timeStamp); Serial.print(" ");
       Serial.print(" nmeaTime "); Serial.print(gpsData.nmeaTime); Serial.print(" ");
       Serial.print(" long "); Serial.print(gpsData.gpsLatitude); Serial.print(" ");
       Serial.print(" lat "); Serial.println(gpsData.gpsLongitude);
       break;
+    // time request message
+    case 'T':
+      esp_now_peer_info *peer = new esp_now_peer_info();
+  
+      peer->peer_addr[0]= mac_addr[0];
+      peer->peer_addr[1]= mac_addr[1];
+      peer->peer_addr[2]= mac_addr[2];
+      peer->peer_addr[3]= mac_addr[3];
+      peer->peer_addr[4]= mac_addr[4];
+      peer->peer_addr[5]= mac_addr[5];
+      peer->channel = 1;
+      peer->encrypt = false;
+      peer->priv = NULL;
+  
+      esp_now_add_peer((const esp_now_peer_info_t*)peer);
     
-    default:
-      Serial.print("Unknown data type "); Serial.println((char)data[0]);
+      hubTS.hubMsg.msgType = 'T';
+      hubTS.hubMsg.timeStamp = micros();
+      Serial.print("Send timestamp to "); 
+      for(int idx = 0; idx < 6; idx++)
+      {
+        Serial.print(":");
+        Serial.print(mac_addr[idx], HEX);
+      }      
+      Serial.print(" (");
+      Serial.print(sizeof(HubTimeStamp));
+      Serial.print(" bytes)");
+      Serial.println(hubTS.hubMsg.timeStamp);
+      uint8_t result = esp_now_send(mac_addr, &hubTS.timeStamp[0], sizeof(HubTimeStamp));
       break;
+    
+    //default:
+    //  Serial.print("Unknown data type "); Serial.println((char)data[0]);
+    //  break;
   }
 }
