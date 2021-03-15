@@ -3,9 +3,9 @@
 // receive data from nodes, write to memory/sd card, etc
 // upload file to PC for analysis
 //
+//#define DEBUG_PRINT
 #include <esp_now.h>
 #include <WiFi.h>
-//#include "BluetoothSerial.h"
 #include "FS.h"
 #include "SD.h"
 
@@ -43,86 +43,27 @@ union HubTimeStampPacket
   HubTimeStamp hubMsg;
   uint8_t timeStamp[5];
 } hubTS;
-//BluetoothSerial SerialBT;
-//String btName = "XGPS160-45E134";
-//char *btPin = "1234"; //<- standard pin would be provided by default
-//bool btConnected;
 
 void setup()
 {
   Serial.begin(115200);
   //Set device in STA mode to begin with
   WiFi.mode(WIFI_STA);
+  #ifdef DEBUG_PRINT
   Serial.println("YamuraLog ESPNow Multi-node & Hub Test");
   // This is the mac address of this device
   Serial.print("Hub MAC: "); Serial.println(WiFi.macAddress());
+  #endif
   // init EPS-NOW
   InitESPNow();
   // register for send callback to get the status of the sent packet
   esp_now_register_send_cb(OnDataSent);
   // register for receive callback to get the received packet
   esp_now_register_recv_cb(OnDataRecv);
-
-  // connect(address) is fast (upto 10 secs max), connect(name) is slow (upto 30 secs max) as it needs
-  // to resolve name to address first, but it allows to connect to different devices with the same name.
-  // Set CoreDebugLevel to Info to view devices bluetooth address and device names
-  // Serial.print("Attempt to connect to "); Serial.println(btName);
-/*
-  SerialBT.begin("ESP32test", true); 
-  btConnected = SerialBT.connect(btName);
-  if(btConnected) 
-  {
-    Serial.println("Connected Succesfully!");
-  }
-  else 
-  {
-    while(!SerialBT.connected(10000)) 
-    {
-      Serial.println("Failed to connect. Make sure remote device is available and in range, then restart app."); 
-    }
-  }
-  // disconnect() may take upto 10 secs max
-  if (SerialBT.disconnect()) 
-  {
-    Serial.println("Disconnected Succesfully!");
-  }
-  // this would reconnect to the name(will use address, if resolved) or address used with connect(name/address).
-  SerialBT.connect();
-*/
 }
 
 void loop()
 {
-  /*
-  if(SerialBT.available() > 0)
-  {
-    String gpsRecieved = "";
-    String outStr = "";
-    byte inByte;
-    // read available byte(s)
-    while (SerialBT.available()) 
-    {
-      //CheckSamples();
-      inByte = SerialBT.read();
-      if(inByte == 10)
-      {
-        break;
-      }
-      gpsRecieved.concat((char)inByte);
-    }
-    if(gpsRecieved.startsWith("$GPRMC"))
-    {
-      Serial.print("Recv from: "); Serial.print(btName); Serial.print(": Time ");
-      Serial.print(millis());
-      Serial.print(" ");
-      Serial.println(gpsRecieved);
-      //outStr.concat(millis());
-      //outStr.concat(" ");
-      //Serial.print(outStr);
-      //LogPrint(gpsRecieved);
-    }
-  }
-  */
 }
 //
 //
@@ -132,11 +73,15 @@ void InitESPNow()
   WiFi.disconnect();
   if (esp_now_init() == ESP_OK)
   {
+    #ifdef DEBUG_PRINT
     Serial.println("ESPNow Init Success");
+    #endif
   }
   else
   {
+    #ifdef DEBUG_PRINT
     Serial.println("ESPNow Init Failed");
+    #endif
     // Retry InitESPNow, add a counte and then restart?
     // InitESPNow();
     // or Simply Restart
@@ -148,11 +93,13 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
   if(status != ESP_NOW_SEND_SUCCESS)
   {
+    #ifdef DEBUG_PRINT
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
              mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
     Serial.print("Last Packet Sent to: "); Serial.println(macStr);
     Serial.print("Last Packet Send Status: "); Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+    #endif
   }
 }
 //
@@ -161,7 +108,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
 {
   Serial.print(micros());
-  Serial.print("\tRecv from:\t");
+  Serial.print("\t");
   for(int idx = 0; idx < 6; idx++)
   {
     Serial.print(mac_addr[idx], HEX);Serial.print(":");
@@ -173,7 +120,8 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
     case 'A':
       memcpy(&accelData, data, sizeof(accelData));
       Serial.print("Time\t"); Serial.print(accelData.timeStamp); Serial.print("\t");
-      Serial.print("Accel\t"); Serial.print(accelData.values[0]); Serial.print("\t");
+      Serial.print("Accel\t"); 
+      Serial.print(accelData.values[0]); Serial.print("\t");
       Serial.print(accelData.values[1]); Serial.print("\t");
       Serial.println(accelData.values[2]);
       break;
@@ -191,14 +139,13 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
     case 'G':
       memcpy(&gpsData, data, sizeof(gpsData));
       Serial.print("Time\t"); Serial.print(gpsData.timeStamp); Serial.print("\t");
-      Serial.print("\tnmeaTime\t"); Serial.print(gpsData.nmeaTime); Serial.print("\t");
-      Serial.print("\tlong\t"); Serial.print(gpsData.gpsLatitude); Serial.print("\t");
-      Serial.print("\tlat\t"); Serial.println(gpsData.gpsLongitude);
+      Serial.print("nmeaTime\t"); Serial.print(gpsData.nmeaTime); Serial.print("\t");
+      Serial.print("long\t"); Serial.print(gpsData.gpsLatitude); Serial.print("\t");
+      Serial.print("lat\t"); Serial.println(gpsData.gpsLongitude);
       break;
     // time request message
     case 'T':
       esp_now_peer_info *peer = new esp_now_peer_info();
-  
       peer->peer_addr[0]= mac_addr[0];
       peer->peer_addr[1]= mac_addr[1];
       peer->peer_addr[2]= mac_addr[2];
@@ -208,11 +155,10 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       peer->channel = 1;
       peer->encrypt = false;
       peer->priv = NULL;
-  
       esp_now_add_peer((const esp_now_peer_info_t*)peer);
-    
       hubTS.hubMsg.msgType = 'T';
       hubTS.hubMsg.timeStamp = micros();
+      #ifdef DEBUG_PRINT
       Serial.print("Send timestamp to "); 
       for(int idx = 0; idx < 6; idx++)
       {
@@ -223,11 +169,13 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       Serial.print(sizeof(HubTimeStamp));
       Serial.print(" bytes)");
       Serial.println(hubTS.hubMsg.timeStamp);
+      #endif
       uint8_t result = esp_now_send(mac_addr, &hubTS.timeStamp[0], sizeof(HubTimeStamp));
       break;
-    
-    //default:
-    //  Serial.print("Unknown data type "); Serial.println((char)data[0]);
-    //  break;
+    default:
+      #ifdef DEBUG_PRINT
+      Serial.print("Unknown data type "); Serial.println((char)data[0]);
+      #endif
+      break;
   }
 }
