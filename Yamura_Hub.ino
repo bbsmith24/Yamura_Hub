@@ -145,6 +145,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       break;
     // time request message
     case 'T':
+    {
       esp_now_peer_info *peer = new esp_now_peer_info();
       peer->peer_addr[0]= mac_addr[0];
       peer->peer_addr[1]= mac_addr[1];
@@ -172,6 +173,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       #endif
       uint8_t result = esp_now_send(mac_addr, &hubTS.timeStamp[0], sizeof(HubTimeStamp));
       break;
+    }
     default:
       #ifdef DEBUG_PRINT
       Serial.print("Unknown data type "); Serial.println((char)data[0]);
