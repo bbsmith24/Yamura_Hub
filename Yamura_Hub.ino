@@ -120,7 +120,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
     case 'A':
       memcpy(&accelData, data, sizeof(accelData));
       Serial.print("Time\t"); Serial.print(accelData.timeStamp); Serial.print("\t");
-      Serial.print("Accel\t"); 
+      Serial.print("ACCEL\t"); 
       Serial.print(accelData.values[0]); Serial.print("\t");
       Serial.print(accelData.values[1]); Serial.print("\t");
       Serial.println(accelData.values[2]);
@@ -131,14 +131,14 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       Serial.print("Time\t"); Serial.print(ioData.timeStamp); Serial.print("\tA2D\t");
       for(int idx = 0; idx < 4; idx++)
       {
-        Serial.print(ioData.a2dValues[0]); Serial.print("\t");
+        Serial.print(ioData.a2dValues[idx]); Serial.print("\t");
       }
       Serial.print("\tdigital\t"); Serial.println(ioData.digitalValue, BIN);
       break;
     // GPS leaf data
     case 'G':
       memcpy(&gpsData, data, sizeof(gpsData));
-      Serial.print("Time\t"); Serial.print(gpsData.timeStamp); Serial.print("\t");
+      Serial.print("Time\t"); Serial.print(gpsData.timeStamp); Serial.print("\tGPS\t");
       Serial.print("nmeaTime\t"); Serial.print(gpsData.nmeaTime); Serial.print("\t");
       Serial.print("long\t"); Serial.print(gpsData.gpsLatitude); Serial.print("\t");
       Serial.print("lat\t"); Serial.println(gpsData.gpsLongitude);
