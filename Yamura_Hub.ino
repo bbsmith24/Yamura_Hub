@@ -85,11 +85,9 @@ void loop()
     testState = testState == LOW ? HIGH : LOW;
     digitalWrite(TEST_DIGITAL, testState);
     digitalWrite(BUILTIN_LED, testState);
-    #ifdef DEBUG_PRINT
     Serial.print(lastTest);
     Serial.print(" Test digital ");
     Serial.println((testState == LOW ? "HIGH" : "LOW"));
-    #endif
   }
   #endif
 }
