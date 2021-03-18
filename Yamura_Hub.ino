@@ -3,8 +3,9 @@
 // receive data from nodes, write to memory/sd card, etc
 // upload file to PC for analysis
 //
-#define PRINT_RECIEVED
+//#define PRINT_RECIEVED
 //#define DEBUG_PRINT
+//#define TEST_IO
 #include <esp_now.h>
 #include <WiFi.h>
 #include "FS.h"
@@ -17,9 +18,9 @@ const uint8_t all_peers[6] {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 struct AccelLeaf
 {
-  char leafType;            // 1 byte  - type, in this case 'A' for accelerometer
-  unsigned long timeStamp;  // 4 bytes - millis() value of sample
-  int16_t values[3];        // 6 bytes - X,Y,Z acceleration values
+  char leafType;            //  1 byte  - type, in this case 'A' for accelerometer
+  unsigned long timeStamp;  //  4 bytes - millis() value of sample
+  int16_t values[6];        // 12 bytes - X,Y,Z acceleration values and i, j, k rotation values
 } accelData;
 //
 struct IOLeaf
@@ -76,21 +77,24 @@ void setup()
 
 void loop()
 {
+  // for testing sync times with A2D leaf
+  #ifdef TEST_IO
   if(micros() - lastTest > 1000000)
   {
     lastTest = micros();
     testState = testState == LOW ? HIGH : LOW;
     digitalWrite(TEST_DIGITAL, testState);
     digitalWrite(BUILTIN_LED, testState);
-    #ifdef PRINT_RECIEVED
+    #ifdef DEBUG_PRINT
     Serial.print(lastTest);
     Serial.print(" Test digital ");
     Serial.println((testState == LOW ? "HIGH" : "LOW"));
     #endif
   }
+  #endif
 }
 //
-//
+// initialize ESP-NOW
 //
 void InitESPNow()
 {
@@ -112,7 +116,9 @@ void InitESPNow()
     ESP.restart();
   }
 }
-// callback when data is sent to leaf
+//
+// callback when data is sent
+//
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
   if(status != ESP_NOW_SEND_SUCCESS)
@@ -150,7 +156,10 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       Serial.print("ACCEL\t"); 
       Serial.print(accelData.values[0]); Serial.print("\t");
       Serial.print(accelData.values[1]); Serial.print("\t");
-      Serial.println(accelData.values[2]);
+      Serial.print(accelData.values[2]); Serial.print("\tGYRO\t");
+      Serial.print(accelData.values[3]); Serial.print("\t");
+      Serial.print(accelData.values[4]); Serial.print("\t");
+      Serial.println(accelData.values[5]);
       #endif 
       break;
     // digital/analog IO leaf data
