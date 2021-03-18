@@ -3,11 +3,17 @@
 // receive data from nodes, write to memory/sd card, etc
 // upload file to PC for analysis
 //
+#define PRINT_RECIEVED
 //#define DEBUG_PRINT
 #include <esp_now.h>
 #include <WiFi.h>
 #include "FS.h"
 #include "SD.h"
+#define TEST_DIGITAL 15
+#define BUILTIN_LED 2
+
+// all known peers - for sending time message
+const uint8_t all_peers[6] {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 struct AccelLeaf
 {
@@ -44,9 +50,15 @@ union HubTimeStampPacket
   uint8_t timeStamp[5];
 } hubTS;
 
+int testState = LOW;
+unsigned long lastTest = 0;
+
 void setup()
 {
   Serial.begin(115200);
+  pinMode(TEST_DIGITAL, OUTPUT);
+  pinMode(BUILTIN_LED, OUTPUT);
+  digitalWrite(TEST_DIGITAL, testState);
   //Set device in STA mode to begin with
   WiFi.mode(WIFI_STA);
   #ifdef DEBUG_PRINT
@@ -64,6 +76,18 @@ void setup()
 
 void loop()
 {
+  if(micros() - lastTest > 1000000)
+  {
+    lastTest = micros();
+    testState = testState == LOW ? HIGH : LOW;
+    digitalWrite(TEST_DIGITAL, testState);
+    digitalWrite(BUILTIN_LED, testState);
+    #ifdef PRINT_RECIEVED
+    Serial.print(lastTest);
+    Serial.print(" Test digital ");
+    Serial.println((testState == LOW ? "HIGH" : "LOW"));
+    #endif
+  }
 }
 //
 //
@@ -107,6 +131,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 //
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
 {
+  #ifdef PRINT_RECIEVED
   Serial.print(micros());
   Serial.print("\t");
   for(int idx = 0; idx < 6; idx++)
@@ -114,34 +139,41 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
     Serial.print(mac_addr[idx], HEX);Serial.print(":");
   }
   Serial.print("\t");
+  #endif
   switch(data[0])
   {
     // accelerometer leaf data
     case 'A':
       memcpy(&accelData, data, sizeof(accelData));
+      #ifdef PRINT_RECIEVED
       Serial.print("Time\t"); Serial.print(accelData.timeStamp); Serial.print("\t");
       Serial.print("ACCEL\t"); 
       Serial.print(accelData.values[0]); Serial.print("\t");
       Serial.print(accelData.values[1]); Serial.print("\t");
       Serial.println(accelData.values[2]);
+      #endif 
       break;
     // digital/analog IO leaf data
     case 'I':
       memcpy(&ioData, data, sizeof(ioData));
+      #ifdef PRINT_RECIEVED
       Serial.print("Time\t"); Serial.print(ioData.timeStamp); Serial.print("\tA2D\t");
       for(int idx = 0; idx < 4; idx++)
       {
         Serial.print(ioData.a2dValues[idx]); Serial.print("\t");
       }
       Serial.print("\tdigital\t"); Serial.println(ioData.digitalValue, BIN);
+      #endif
       break;
     // GPS leaf data
     case 'G':
       memcpy(&gpsData, data, sizeof(gpsData));
+      #ifdef PRINT_RECIEVED
       Serial.print("Time\t"); Serial.print(gpsData.timeStamp); Serial.print("\tGPS\t");
       Serial.print("nmeaTime\t"); Serial.print(gpsData.nmeaTime); Serial.print("\t");
       Serial.print("long\t"); Serial.print(gpsData.gpsLatitude); Serial.print("\t");
       Serial.print("lat\t"); Serial.println(gpsData.gpsLongitude);
+      #endif
       break;
     // time request message
     case 'T':
@@ -159,7 +191,9 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       esp_now_add_peer((const esp_now_peer_info_t*)peer);
       hubTS.hubMsg.msgType = 'T';
       hubTS.hubMsg.timeStamp = micros();
-      #ifdef DEBUG_PRINT
+
+
+      #ifdef PRINT_RECIEVED
       Serial.print("Send timestamp to "); 
       for(int idx = 0; idx < 6; idx++)
       {
