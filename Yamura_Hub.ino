@@ -3,7 +3,7 @@
 // receive data from nodes, write to memory/sd card, etc
 // upload file to PC for analysis
 //
-//#define PRINT_RECIEVED
+#define PRINT_RECIEVED
 //#define DEBUG_PRINT
 //#define TEST_IO
 #include <esp_now.h>
@@ -50,7 +50,6 @@ union HubTimeStampPacket
   HubTimeStamp hubMsg;
   uint8_t timeStamp[5];
 } hubTS;
-
 int testState = LOW;
 unsigned long lastTest = 0;
 
@@ -198,6 +197,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       esp_now_add_peer((const esp_now_peer_info_t*)peer);
       hubTS.hubMsg.msgType = 'T';
       hubTS.hubMsg.timeStamp = micros();
+      uint8_t result = esp_now_send(mac_addr, &hubTS.timeStamp[0], sizeof(HubTimeStamp));
 
 
       #ifdef PRINT_RECIEVED
@@ -212,6 +212,30 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
       Serial.print(" bytes)");
       Serial.println(hubTS.hubMsg.timeStamp);
       #endif
+      break;
+    }
+    // leaf hearbeat message
+    case 'H':
+    {
+      unsigned long now = micros();
+      int delta = now - hubTS.hubMsg.timeStamp;
+      memcpy(&hubTS, data, sizeof(hubTS));
+      Serial.print("Heartbeat: Hub Time\t"); Serial.print(now);
+      Serial.print("\tLeaf Time\t"); Serial.print(hubTS.hubMsg.timeStamp);
+      Serial.print("\tDiff\t"); Serial.println(now - hubTS.hubMsg.timeStamp);
+      esp_now_peer_info *peer = new esp_now_peer_info();
+      peer->peer_addr[0]= mac_addr[0];
+      peer->peer_addr[1]= mac_addr[1];
+      peer->peer_addr[2]= mac_addr[2];
+      peer->peer_addr[3]= mac_addr[3];
+      peer->peer_addr[4]= mac_addr[4];
+      peer->peer_addr[5]= mac_addr[5];
+      peer->channel = 1;
+      peer->encrypt = false;
+      peer->priv = NULL;
+      esp_now_add_peer((const esp_now_peer_info_t*)peer);
+      hubTS.hubMsg.msgType = 'T';
+      hubTS.hubMsg.timeStamp = micros();
       uint8_t result = esp_now_send(mac_addr, &hubTS.timeStamp[0], sizeof(HubTimeStamp));
       break;
     }
