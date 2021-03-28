@@ -127,7 +127,9 @@ void loop()
         sprintf(msgOut, "I %lu\t%d\t%d\t%d\t%d\t%02X\n", ioPacket.packet.timeStamp, 
                                                          ioPacket.packet.a2dValues[0], ioPacket.packet.a2dValues[1], ioPacket.packet.a2dValues[2], ioPacket.packet.a2dValues[3], 
                                                          ioPacket.packet.digitalValue);
-        Serial.print(msgOut);
+        //writeFile(SD, nextLogName, msgOut, strlen(msgOut));
+        writeToOpenFile(msgOut, strlen(msgOut));
+        //Serial.print(msgOut);
       }
       else if(dataBytes[0] == 'A')
       {
@@ -136,7 +138,9 @@ void loop()
         sprintf(msgOut, "A %lu\t%d\t%d\t%d\t%d\t%d\t%d\n", accelPacket.packet.timeStamp, 
                                                          accelPacket.packet.values[0], accelPacket.packet.values[1], accelPacket.packet.values[2],
                                                          accelPacket.packet.values[3], accelPacket.packet.values[4], accelPacket.packet.values[5]);
-        Serial.print(msgOut);
+        //writeFile(SD, nextLogName, msgOut, strlen(msgOut));
+        writeToOpenFile(msgOut, strlen(msgOut));
+        //Serial.print(msgOut);
       }
       else if(dataBytes[0] == 'G')
       {
@@ -144,7 +148,11 @@ void loop()
         dataBytesCnt = 0;
         sprintf(msgOut, "G %lu\t%s\t%s\t%s\n", gpsPacket.packet.timeStamp, 
                                                            gpsPacket.packet.nmeaTime, gpsPacket.packet.gpsLatitude, gpsPacket.packet.gpsLongitude);
-        Serial.print(msgOut);
+        //writeFile(SD, nextLogName, msgOut, strlen(msgOut));
+        writeToOpenFile(msgOut, strlen(msgOut));
+        Serial.println("fluch to file");
+        currentLogFile.flush();
+        //Serial.print(msgOut);
       }
       // received timestamp request or heartbeat while logging - update state
       else if((dataBytes[0] == 'T') || (dataBytes[0] == 'H'))
@@ -296,7 +304,7 @@ void SendLoggingChange(LogState newState)
   // logging started
   if(isLogging == LogState::ON)
   {
-    currentLogFile = SD.open(nextLogName);
+    currentLogFile = SD.open(nextLogName, FILE_WRITE);
     #ifdef PRINT_DEBUG
     Serial.print(micros());
     Serial.println(" START logging");
@@ -473,6 +481,8 @@ void FindNextLogfile()
     if(!file.isDirectory()) // not a directory, therefore a file
     {
       String fileNameStr = String(file.name());
+      Serial.print("Found ");
+      Serial.println(fileNameStr);
       if(fileNameStr.startsWith("/Log_"))
       {
         nextLogIdx++;
@@ -484,6 +494,8 @@ void FindNextLogfile()
   sprintf(nextLogName, "/Log_%04d%s", nextLogIdx,".ylg");
   Serial.print("Next log file : ");
   Serial.println(nextLogName);
+  sprintf(msgOut,"YamuraLog 3.0\n%s\n", nextLogName);
+  writeFile(SD, nextLogName, msgOut, strlen(msgOut));
   #endif
 }
 //
@@ -492,7 +504,7 @@ void FindNextLogfile()
 void writeFile(fs::FS &fs, const char * path, const char * message, int messageLen)
 {
   File file = fs.open(path, FILE_APPEND);
-  //file.write(message, messageLen);
+  file.write((const uint8_t*)message, messageLen);
   //file.print(message);
   file.close();
 }
@@ -510,4 +522,15 @@ void appendFile(fs::FS &fs, const char * path, const char * message)
   File file = fs.open(path, FILE_APPEND);
   file.print(message);
   file.close();
+}
+//
+// write to open file, flush (no open/close
+//
+void writeToOpenFile(const char * message, int messageLen)
+{
+  byte written = currentLogFile.write((const uint8_t*)message, messageLen);
+  Serial.print("Write (");
+  Serial.print(written);
+  Serial.print(") ");
+  Serial.print(message);  
 }
