@@ -7,10 +7,56 @@
 #include <esp_now.h>
 #include <WiFi.h>
 #include "FS.h"
-#include "SD.h"
+#include <LITTLEFS.h>
 #include "SPI.h"
+#include "SdFat.h"
+#include "sdios.h"
 #include "DataStructures.h"
+// SDFAT library defines
+// SD_FAT_TYPE for SdFat/File as defined in SdFatConfig.h,
+// 1 for FAT16/FAT32
+// 2 for exFAT
+// 3 for FAT16/FAT32 and exFAT.
+#define SD_FAT_TYPE 3
+//
+// Set DISABLE_CHIP_SELECT to disable a second SPI device.
+// For example, with the Ethernet shield, set DISABLE_CHIP_SELECT
+// to 10 to disable the Ethernet controller.
+const int8_t DISABLE_CHIP_SELECT = -1;
+//
+// Test with reduced SPI speed for breadboards.  SD_SCK_MHZ(4) will select
+// the highest speed supported by the board that is not over 4 MHz.
+// Change SPI_SPEED to SD_SCK_MHZ(50) for best performance.
+#define SPI_SPEED SD_SCK_MHZ(4)
+#if SD_FAT_TYPE == 0
+SdFat sd;
+File logFileSD;
+#elif SD_FAT_TYPE == 1
+SdFat32 sd;
+File32 logFileSD;
+File32 currentLogFile;
+#elif SD_FAT_TYPE == 2
+SdExFat sd;
+ExFile logFileSD;
+ExFile currentLogFile;
+#elif SD_FAT_TYPE == 3
+SdFs sd;
+FsFile logFileSD;
+//FsFile currentLogFile;
+#else  // SD_FAT_TYPE
+#error Invalid SD_FAT_TYPE
+#endif  // SD_FAT_TYPE
+// SD card chip select
+// connections ESP32 WROOM
+// GPIO23 (MOSI) to card SI
+// GPIO19 (MISO) to card SO
+// GPIO18 (SCK)  to card SCK
+// GPIO5  (SS)   to card CS
+// define chip select
+//int chipSelect = 5; // HiLetgo Node32S
+int chipSelect = 33;  // Sparkfun ESP32 Thing Plus
 
+#define FORMAT_LITTLEFS_IF_FAILED true
 #define PRINT_RECIEVED
 #define PRINT_DEBUG
 //#define TEST_IO
@@ -27,8 +73,8 @@ enum LogState
 
 // data packets
 TimeStampPacket timeStampPacket;
-AccelPacket accelPacket;
-IOPacket    ioPacket;
+IMUPacket imuPacket;
+CombinedIOPacket    combinedIOPacket;
 GPSPacket   gpsPacket;
 // ESP-NOW
 #define MAX_PEERS 20 // ESP-NOW peer limit
@@ -46,14 +92,15 @@ volatile LogState isLogging = LogState::UNDEFINED;
 bool logBtnPress;
 unsigned long logBtnDebounceStart = 0;
 int nextLogIdx = 0;
-char nextLogName[256];
-File currentLogFile;
+char nextLogName[13];
+//BufferedPrint<File, 64> fileBuffer;
+//BufferedPrint<FsFile, 64> fileBuffer;
+// temp file in flash for this session
+File flashFile;
+
 char msgOut[256];
 // max data packet size os 250 bytes
 uint8_t dataBytes[250];
-int dataBytesCnt = 0;
-TaskHandle_t Task1;
-uint8_t lastMac[6];
 
 void setup()
 {
@@ -71,20 +118,27 @@ void setup()
       peers[peerIdx].peer_addr[macIdx] = 0;
     }
   }
+  peerCnt = 0;
   WiFi.mode(WIFI_STA);
   Serial.println();
-  Serial.println("YamuraLog ESPNow Multi-node & Hub Test");
   // This is the mac address of this device
-  Serial.println("HUB MAC: "); Serial.println(WiFi.macAddress());
-  while(!InitSD())
+  Serial.print("YamuraLog Hub ");Serial.println(WiFi.macAddress());
+  while(!InitializeSD())
   {
     #ifdef PRINT_DEBUG
-    Serial.println("No SD card found. Retry...");
+    Serial.println("No SD card or SD error. Retry...");
+    #endif
+    delay(1000);
+  }
+  while(!InitializeFlash())
+  {
+    #ifdef PRINT_DEBUG
+    Serial.println("Flash error. Retry...");
     #endif
     delay(1000);
   }
   // get log file name
-  FindNextLogfile();
+  FindNextSDFile();
   // init EPS-NOW
   InitESPNow();
   // register for send and receive callback functions
@@ -97,15 +151,9 @@ void setup()
   logBtnDebounceStart = 0;
   lastBroadcastTime = micros();
 
-  xTaskCreatePinnedToCore(CheckLogButton,
-                          "CheckLogButton",
-                          10000,
-                          NULL,
-                          1,
-                          &Task1, 
-                          0);
   Serial.println("Running");
-}
+  logBtnDebounceStart = millis();
+ }
 
 void loop() 
 {
@@ -115,159 +163,81 @@ void loop()
     BroadcastTimestamp();
     lastBroadcastTime = micros();
   }
-  if(dataBytesCnt > 0)
-  {
-    if(isLogging == LogState::ON)
-    {
-      if(dataBytes[0] == 'I')
-      {
-        memcpy(&ioPacket, dataBytes, sizeof(ioPacket));
-        dataBytesCnt = 0;
-        //AddPeer(lastMac);
-        sprintf(msgOut, "I %lu\t%d\t%d\t%d\t%d\t%02X\n", ioPacket.packet.timeStamp, 
-                                                         ioPacket.packet.a2dValues[0], ioPacket.packet.a2dValues[1], ioPacket.packet.a2dValues[2], ioPacket.packet.a2dValues[3], 
-                                                         ioPacket.packet.digitalValue);
-        //writeFile(SD, nextLogName, msgOut, strlen(msgOut));
-        writeToOpenFile(msgOut, strlen(msgOut));
-        //Serial.print(msgOut);
-      }
-      else if(dataBytes[0] == 'A')
-      {
-        memcpy(&accelPacket, dataBytes, sizeof(accelPacket));
-        dataBytesCnt = 0;
-        sprintf(msgOut, "A %lu\t%d\t%d\t%d\t%d\t%d\t%d\n", accelPacket.packet.timeStamp, 
-                                                         accelPacket.packet.values[0], accelPacket.packet.values[1], accelPacket.packet.values[2],
-                                                         accelPacket.packet.values[3], accelPacket.packet.values[4], accelPacket.packet.values[5]);
-        //writeFile(SD, nextLogName, msgOut, strlen(msgOut));
-        writeToOpenFile(msgOut, strlen(msgOut));
-        //Serial.print(msgOut);
-      }
-      else if(dataBytes[0] == 'G')
-      {
-        memcpy(&gpsPacket, dataBytes, sizeof(gpsPacket));
-        dataBytesCnt = 0;
-        sprintf(msgOut, "G %lu\t%s\t%s\t%s\n", gpsPacket.packet.timeStamp, 
-                                                           gpsPacket.packet.nmeaTime, gpsPacket.packet.gpsLatitude, gpsPacket.packet.gpsLongitude);
-        //writeFile(SD, nextLogName, msgOut, strlen(msgOut));
-        writeToOpenFile(msgOut, strlen(msgOut));
-        Serial.println("fluch to file");
-        currentLogFile.flush();
-        //Serial.print(msgOut);
-      }
-      // received timestamp request or heartbeat while logging - update state
-      else if((dataBytes[0] == 'T') || (dataBytes[0] == 'H'))
-      {
-        BroadcastTimestamp();
-        SendLoggingState(lastMac);
-      }
-    }
-    else
-    {
-      if(dataBytes[0] == 'T')
-      {
-        snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tTIMESTAMP REQ\n",
-             micros(), 
-             lastMac[0], lastMac[1], lastMac[2], lastMac[3], lastMac[4], lastMac[5]);
-        Serial.print(msgOut);
-      }
-      else if(dataBytes[0] == 'H')
-      {
-        snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tHEARTBEAT RCV\n",
-             micros(), 
-             lastMac[0], lastMac[1], lastMac[2], lastMac[3], lastMac[4], lastMac[5]);
-        Serial.print(msgOut);
-      }
-      // received data while idle - update state
-      else if((dataBytes[0] == 'A') || (dataBytes[0] == 'I') || (dataBytes[0] == 'G'))
-      {
-        SendLoggingState(lastMac);
-      }
-      
-      dataBytesCnt = 0;
-      AddPeer(lastMac);
-    }
-  }
   // check log button state
-  //CheckLogButton();
+  CheckLogButton();
 }
 //
 // check for log button press/release to change state
 //
-void CheckLogButton(void * pvParameters )
+void CheckLogButton()
 {
   unsigned long curTime = millis();
-  while(true)
+  // check for log button press with 1 sec debounce
+  
+  if((digitalRead(LOG_BUTTON) == LOW) && (logBtnDebounceStart == 0))
   {
-    delay(100);
-    //if(millis() - curTime < 100)
-    //{
-    //  continue;
-    //}
-    curTime = millis();
-    // check for log button press with 1 sec debounce
+    Serial.println("LOG_BUTTON LOW (start)");
+    logBtnDebounceStart = millis();
+  }
+  if((digitalRead(LOG_BUTTON) == HIGH) && (logBtnDebounceStart != 0))
+  {
+    Serial.println("LOG_BUTTON HIGH");
+    if(millis() - logBtnDebounceStart >= 1000)
+    {
+      #ifdef PRINT_DEBUG
+      Serial.print("CheckLogButton on core ");
+      Serial.print(xPortGetCoreID());
+      Serial.print(" Button release, send logging change to ");
+      Serial.println((isLogging == LogState::ON ? "LogState::OFF" : "LogState::ON"));
+      #endif
+      SendLoggingChange((isLogging == LogState::ON ? LogState::OFF : LogState::ON));
+    }
     logBtnDebounceStart = 0;
-    while(digitalRead(LOG_BUTTON) == LOW)
-    {
-    }
-    if(millis() - curTime >= 1000)
-    {
-        #ifdef PRINT_DEBUG
-        Serial.print("CheckLogButton on core ");
-        Serial.println(xPortGetCoreID());
-        Serial.print(" Button release, send logging change to ");
-        Serial.println((isLogging == LogState::ON ? "LogState::OFF" : "LogState::ON"));
-        #endif
-        SendLoggingChange((isLogging == LogState::ON ? LogState::OFF : LogState::ON));
-    }
   }
 }
 //
+// initialize SD card
 //
-//
-bool InitSD()
+bool InitializeSD()
 {
-  if(!SD.begin())
+  if (!sd.begin(chipSelect, SPI_SPEED)) 
   {
-      #ifdef PRINT_DEBUG
-      Serial.println("Card Mount Failed");
-	  #endif
+    if (sd.card()->errorCode()) 
+    {
+      Serial.print(F("\nSD initialization failed"));
+      Serial.print(F("errorCode: "));Serial.print((int)showbase, HEX);
+      Serial.print(F(" "));
+      Serial.print(int(sd.card()->errorCode()));
+      Serial.print(F(" errorData: "));Serial.print(int(sd.card()->errorData()));
+      Serial.println((int)noshowbase);
       return false;
+    }
+    if (sd.vol()->fatType() == 0) 
+    {
+      Serial.print(F("No valid FAT16/FAT32 partition - reformat card\n"));
+      return false;
+    }
+    Serial.print(F("Unknown error\n"));
+    return false;
   }
-  uint8_t cardType = SD.cardType();
-  switch(cardType)
+
+  uint32_t size = sd.card()->sectorCount();
+  if (size == 0) 
   {
-    case CARD_NONE:
-      #ifdef PRINT_DEBUG
-      Serial.println("No SD card attached");
-	  #endif
-      return false;
-      break;
-    case CARD_MMC:
-      #ifdef PRINT_DEBUG
-      Serial.print("MMC ");
-	  #endif
-      break;
-    case CARD_SD:
-      #ifdef PRINT_DEBUG
-      Serial.print("SDSC ");
-	  #endif
-      break;
-    case CARD_SDHC:
-      #ifdef PRINT_DEBUG
-      Serial.print("SDHC ");
-	  #endif
-      break;
-    default:
-      #ifdef PRINT_DEBUG
-      Serial.print("Unknown card type ");
-	  #endif
-	  return false;
-      break;
+    Serial.print(F("Can't determine the SD card size.\n"));
+    return false;
   }
-  #ifdef PRINT_DEBUG
-  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-  Serial.printf("Card Size: %lulMB\n", cardSize);
-  #endif
+  Serial.println(F("\nSD card initialized"));
+  uint32_t sizeMB = 0.000512 * size + 0.5;
+  Serial.print(F("\tVolume is FAT"));Serial.println(int(sd.vol()->fatType()));
+  Serial.print(F("\tCard size: "));Serial.print(sizeMB);Serial.println(F("MB"));
+  Serial.print(F("\tCluster size (bytes): "));Serial.println( sd.vol()->bytesPerCluster());
+
+  if ((sizeMB > 1100 && sd.vol()->sectorsPerCluster() < 64) || 
+      (sizeMB < 2200 && sd.vol()->fatType() == 32)) 
+  {
+    Serial.println(F("\tWARNING - Reformat for best performance"));
+  }
   return true;
 }
 //
@@ -300,27 +270,45 @@ void SendLoggingChange(LogState newState)
     return;
   }
   isLogging = newState;
-  char msgType = isLogging == LogState::ON ? 'B' : 'E';
+  char msgType = isLogging == LogState::ON ? LOGGING_BEGIN : LOGGING_END;
   // logging started
   if(isLogging == LogState::ON)
   {
-    currentLogFile = SD.open(nextLogName, FILE_WRITE);
+    // open or create file - truncate existing file.
+    if(!OpenFlash(nextLogName))
+    {
+      #ifdef PRINT_DEBUG
+      Serial.print("Failed to open Flash file ");
+      Serial.print(nextLogName);
+      Serial.println(", logging halted");
+      #endif
+      isLogging = LogState::OFF;
+      return;
+    }
     #ifdef PRINT_DEBUG
     Serial.print(micros());
-    Serial.println(" START logging");
+    Serial.print(" START logging to ");
+    Serial.println(nextLogName);
     #endif
   }
   // logging ended
   else
   {
     // close current file
-    currentLogFile.close();
+    double s = CloseFlash(nextLogName);
     // find next file
     #ifdef PRINT_DEBUG
     Serial.print(micros());
-    Serial.println(" END logging");
+    Serial.print(" END logging to file ");
+    Serial.print(nextLogName);
+    Serial.print(" (");
+    Serial.print(s);
+    Serial.print(") bytes");
+    Serial.println();
+    CopyFlashToSD(nextLogName);
+    DeleteFlash(nextLogName);
     #endif
-    FindNextLogfile();    
+    FindNextSDFile();    
   }
   uint8_t result = esp_now_send(0, (const uint8_t*)&msgType, sizeof(msgType));
   #ifdef PRINT_DEBUG
@@ -341,16 +329,17 @@ void SendLoggingChange(LogState newState)
 // send current logging state to out-of-phase leaf
 // (logging when hub is idle, idle when hub is logging)
 //
-void SendLoggingState(uint8_t *macAddr)
+void SendLoggingState(const uint8_t *macAddr)
 {
-  char msgType = isLogging == LogState::ON ? 'B' : 'E';
+  AddPeer(macAddr);
+  char msgType = isLogging == LogState::ON ? LOGGING_BEGIN : LOGGING_END;
   uint8_t result = esp_now_send(macAddr, (const uint8_t*)&msgType, sizeof(msgType));
   #ifdef PRINT_DEBUG
   Serial.print("Send current hub logging state "); 
   Serial.print(isLogging == LogState::ON ? "LOGGING to " : "IDLE to ");
-  snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\n",
+  snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tresult\t%d\n",
            micros(), 
-           macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+           macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5], result);
   Serial.print(msgOut);
   #endif
 }
@@ -371,14 +360,59 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 }
 //
 // callback when data is received
-// just receive data and update byte count here, acting on type of data sent is handled elsewhere
-// to keep this funcion fast
 //
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
 {
-  memcpy(&lastMac, mac_addr, 6);
-  memcpy(&dataBytes, data, data_len);
-  dataBytesCnt = data_len;
+  if(isLogging == LogState::ON)
+  {
+    // timestamp request or heartbeat received while hub logging on - send start logging to leaf
+    if((data[0] == TIMESTAMP_TYPE) ||
+       (data[0] == HEARTBEAT_TYPE))
+    {
+      SendLoggingState(mac_addr);        
+    }
+    // store sensor data
+    else
+    {
+      WriteFlash(data, data_len);
+    }
+  }
+  // data received while logging is off
+  else
+  {
+    // timestamp request or heartbeat 
+    if(data[0] == TIMESTAMP_TYPE)
+    {
+      memcpy(&timeStampPacket, data, data_len);
+      sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tTIMESTAMP REQt%010lu\n",
+           micros(), 
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+           timeStampPacket.packet.timeStamp);
+      Serial.print(msgOut);
+      AddPeer(mac_addr);
+      BroadcastTimestamp(mac_addr);
+    }
+    else if (data[0] == HEARTBEAT_TYPE)
+    {
+      memcpy(&timeStampPacket, data, data_len);
+      sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tHEARTBEAT\t%010lu\n",
+           micros(), 
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+           timeStampPacket.packet.timeStamp);
+      Serial.print(msgOut);
+      AddPeer(mac_addr);
+    }
+    // data received while hub logging off - send stop logging to leaf    
+    else
+    {
+      sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\t%c\n",
+           micros(), 
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+           (char)data[0]);
+      Serial.print(msgOut);
+      SendLoggingState(mac_addr);        
+    }
+  }
 }
 //
 //
@@ -386,6 +420,19 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
 void AddPeer(const uint8_t* mac_addr)
 {
   bool peerFound = false;
+  bool peerValid = false;
+  for(int macIdx = 0; macIdx < 6; macIdx++)
+  {
+    if((int)mac_addr[macIdx] != 0)
+    {
+      peerValid =  true;
+      break;
+    }
+  }
+  if(!peerValid)
+  {
+    return;
+  }
   int peerIdx = 0;
   while((peerIdx < peerCnt) && (peerFound == false))
   {
@@ -399,42 +446,36 @@ void AddPeer(const uint8_t* mac_addr)
     }
     peerIdx++;
   }
-  if(!peerFound)
+  if(peerFound)
   {
-    for(int macIdx = 0; macIdx < 6; macIdx++)
-    {
-      peers[peerCnt].peer_addr[macIdx]= mac_addr[macIdx];
-    }
-    peers[peerCnt].channel = 1;
-    peers[peerCnt].encrypt = false;
-    peers[peerCnt].priv = NULL;
-    uint8_t result = esp_now_add_peer(&peers[peerCnt]);
-    peerCnt++;
-    #ifdef PRINT_DEBUG
-    if(result == 0)
-    {
-      snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tadded as peer %d\n", 
-               micros(), 
-               mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
-               (peerCnt));
-    }
-    else
-    {
-      snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tNOT added as peer ERROR %d\n", 
-               rcvTime, 
-               mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5], 
-               result);
-    }
-    Serial.print(msgOut);
-    #endif
+    return;
+  }
+  for(int macIdx = 0; macIdx < 6; macIdx++)
+  {
+    peers[peerCnt].peer_addr[macIdx]= mac_addr[macIdx];
+  }
+  peers[peerCnt].channel = 1;
+  peers[peerCnt].encrypt = false;
+  peers[peerCnt].priv = NULL;
+  uint8_t result = esp_now_add_peer(&peers[peerCnt]);
+  peerCnt++;
+  #ifdef PRINT_DEBUG
+  if(result == 0)
+  {
+    sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tadded as peer %d\n", 
+             micros(), 
+             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+             (peerCnt));
   }
   else
   {
-     snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\talready a peer\n", 
-               rcvTime, 
-               mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-     
+    sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tNOT added as peer ERROR %d\n", 
+             rcvTime, 
+             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5], 
+             result);
   }
+  Serial.print(msgOut);
+  #endif
 }
 //
 //
@@ -443,14 +484,14 @@ void BroadcastTimestamp()
 {
   // setup timestamp
   uint8_t result;
-  timeStampPacket.packet.msgType[0] = 'T';
+  timeStampPacket.packet.msgType = TIMESTAMP_TYPE;
   timeStampPacket.packet.timeStamp = micros();
   // send to all known peers
   result = esp_now_send(0, &timeStampPacket.dataBytes[0], sizeof(timeStampPacket));
   #ifdef PRINT_DEBUG
   for(int peerIdx = 0; peerIdx < peerCnt; peerIdx++)
   {
-    snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tBroadcast timestamp\t%lu\n",
+    sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tBroadcast timestamp\t%lu\n",
              timeStampPacket.packet.timeStamp, 
              peers[peerIdx].peer_addr[0], peers[peerIdx].peer_addr[1], peers[peerIdx].peer_addr[2], peers[peerIdx].peer_addr[3], peers[peerIdx].peer_addr[4], peers[peerIdx].peer_addr[5],
              timeStampPacket.packet.timeStamp);
@@ -459,78 +500,211 @@ void BroadcastTimestamp()
   #endif
 }
 //
+//
+//
+void BroadcastTimestamp(const uint8_t* mac_addr)
+{
+  // setup timestamp
+  uint8_t result;
+  timeStampPacket.packet.msgType = TIMESTAMP_TYPE;
+  timeStampPacket.packet.timeStamp = micros();
+  // send to all known peers
+  result = esp_now_send(mac_addr, &timeStampPacket.dataBytes[0], sizeof(timeStampPacket));
+  #ifdef PRINT_DEBUG
+  sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tBroadcast timestamp\t%lu\n",
+           timeStampPacket.packet.timeStamp, 
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+           timeStampPacket.packet.timeStamp);
+  Serial.print(msgOut);
+  #endif
+}
+//
 // get next sequential log file name
 //
-void FindNextLogfile()
+//
+// find the next log_nnnn.ylg file in series
+//
+void FindNextSDFile()
 {
-  Serial.println("Finding next LOG file to create...");
-  int levels = 0;
-  File root = SD.open("/");
-  if((!root) || (!root.isDirectory()))
+  int logIdx = 0;
+  while(true)
   {
-    #ifdef PRINT_DEBUG
-    Serial.println("Failed to open requested directory");
-	  #endif
+    sprintf(nextLogName, "/log_%04d.ylg", logIdx);
+    if(!sd.exists(nextLogName))
+    {
+      break;
+    }
+    logIdx++;
+  }
+  Serial.print("Next file ");
+  Serial.println(nextLogName);
+}
+//
+// LittleFS (Flash) functions
+// 
+// 
+// initialize - format on first use
+//
+bool InitializeFlash()
+{
+  if(!LITTLEFS.begin(FORMAT_LITTLEFS_IF_FAILED))
+  {
+      Serial.println("Flash mount Failed");
+      return false;
+  }
+  Serial.println(F("\nFlash initialized"));
+  Serial.print(F("\tAvailable "));
+  Serial.println(LITTLEFS.totalBytes()/1000.0, 3);
+  Serial.print(F("\tUsed "));
+  Serial.print(LITTLEFS.usedBytes()/1000.0, 3);
+  Serial.println(F("KB"));
+  int levels = 4;
+  File root = LITTLEFS.open("/");
+  if(!root)
+  {
+    Serial.println("- failed to open directory");
+    return true;
+  }
+  if(!root.isDirectory())
+  {
+    Serial.println(" - not a directory");
+    return true;
+  }
+  File file = root.openNextFile();
+  while(file)
+  {
+    if(file.isDirectory())
+    {
+      Serial.print("  DIR : ");
+      Serial.println(file.name());
+      if(levels)
+      {
+        ListFlashDir(file.name(), levels -1);
+      }
+    }
+    else 
+    {
+      Serial.print("  FILE: ");
+      Serial.print(file.name());
+      Serial.print("\tSIZE: ");
+      Serial.println(file.size());
+    }
+    file = root.openNextFile();
+  }
+  return true;
+}
+void ListFlashDir(const char * dirname, uint8_t levels)
+{
+  Serial.printf("Listing directory: %s\r\n", dirname);
+
+  File root = LITTLEFS.open(dirname);
+  if(!root)
+  {
+    Serial.println("- failed to open directory");
+    return;
+  }
+  if(!root.isDirectory())
+  {
+    Serial.println(" - not a directory");
     return;
   }
 
   File file = root.openNextFile();
-  nextLogIdx = 0;
   while(file)
   {
-    if(!file.isDirectory()) // not a directory, therefore a file
+    if(file.isDirectory())
     {
-      String fileNameStr = String(file.name());
-      Serial.print("Found ");
-      Serial.println(fileNameStr);
-      if(fileNameStr.startsWith("/Log_"))
+      Serial.print("  DIR : ");
+      Serial.println(file.name());
+      if(levels)
       {
-        nextLogIdx++;
+        ListFlashDir(file.name(), levels -1);
       }
+    }
+    else 
+    {
+      Serial.print("  FILE: ");
+      Serial.print(file.name());
+      Serial.print("\tSIZE: ");
+      Serial.println(file.size());
     }
     file = root.openNextFile();
   }
-  #ifdef PRINT_DEBUG
-  sprintf(nextLogName, "/Log_%04d%s", nextLogIdx,".ylg");
-  Serial.print("Next log file : ");
-  Serial.println(nextLogName);
-  sprintf(msgOut,"YamuraLog 3.0\n%s\n", nextLogName);
-  writeFile(SD, nextLogName, msgOut, strlen(msgOut));
-  #endif
 }
 //
-// write to file
+// write to open flash file
 //
-void writeFile(fs::FS &fs, const char * path, const char * message, int messageLen)
+int WriteFlash(const uint8_t * msg, size_t msgSize)
 {
-  File file = fs.open(path, FILE_APPEND);
-  file.write((const uint8_t*)message, messageLen);
-  //file.print(message);
-  file.close();
-}
-void printFile(fs::FS &fs, const char * path, const char * message)
-{
-  File file = fs.open(path, FILE_APPEND);
-  file.print(message);
-  file.close();
+  return flashFile.write(msg, msgSize);
 }
 //
-// append to file
+// delete flash file
 //
-void appendFile(fs::FS &fs, const char * path, const char * message)
+void DeleteFlash(const char * path)
 {
-  File file = fs.open(path, FILE_APPEND);
-  file.print(message);
-  file.close();
+  Serial.printf("Delete FLASH file: %s ", path);
+  if(!LITTLEFS.remove(path))
+  {
+      Serial.print("- delete failed");
+  }
+  Serial.println();
 }
 //
-// write to open file, flush (no open/close
+// copy flash file to SD
 //
-void writeToOpenFile(const char * message, int messageLen)
+void CopyFlashToSD(const char * path)
 {
-  byte written = currentLogFile.write((const uint8_t*)message, messageLen);
-  Serial.print("Write (");
-  Serial.print(written);
-  Serial.print(") ");
-  Serial.print(message);  
+  Serial.printf("Copy file: %s from FLASH to SD ", path);
+
+  flashFile = LITTLEFS.open(path);
+  if(!flashFile || flashFile.isDirectory()){
+      Serial.println("- failed to open FLASH file for read");
+      return;
+  }
+  if (!logFileSD.open(path, O_RDWR | O_CREAT | O_TRUNC)) 
+  {
+    sd.errorHalt(&Serial, F(" - failed to open SD file for write"));
+    return;
+  }
+
+  static uint8_t buf[512];
+  size_t len = flashFile.size();
+  while(len)
+  {
+    size_t toRead = len;
+    if(toRead > 512)
+    {
+      toRead = 512;
+    }
+    flashFile.read(buf, toRead);
+    logFileSD.write(buf, toRead);
+    Serial.print(".\r");
+    len -= toRead;
+  }
+  flashFile.close();  
+  logFileSD.close();
+  Serial.println();
+  Serial.printf("Done! file: %s copied from FLASH to SD\n", path);
+}
+//
+//
+//
+bool OpenFlash(const char * path)
+{
+  flashFile = LITTLEFS.open(path, FILE_WRITE);
+  if(!flashFile)
+  {
+      Serial.println("- failed to open file for writing");
+      return false;
+  }
+  return true;
+}
+unsigned long CloseFlash(const char * path)
+{
+  flashFile.close();
+  flashFile = LITTLEFS.open(path);
+  unsigned long len = flashFile.size();
+  flashFile.close();
+  return len;
 }
