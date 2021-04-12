@@ -7,6 +7,8 @@
 // build for Sparkfun ESP32 Thing Plus, large SPIFFS
 // this should make about 8MB available for current log flash store
 //
+#define PRINT_DEBUG
+
 #include <esp_now.h>
 #include <WiFi.h>
 #include "FS.h"
@@ -61,7 +63,6 @@ int chipSelect = 33;  // Sparkfun ESP32 Thing Plus
 
 #define FORMAT_LITTLEFS_IF_FAILED true
 #define PRINT_RECIEVED
-#define PRINT_DEBUG
 //#define TEST_IO
 #define BUILTIN_LED 2
 #define LOG_BUTTON    4
@@ -75,10 +76,10 @@ enum LogState
 };
 
 // data packets
-TimeStampPacket timeStampPacket;
-IMUPacket imuPacket;
-CombinedIOPacket    combinedIOPacket;
-GPSPacket   gpsPacket;
+//TimeStampPacket timeStampPacket;
+//IMUPacket imuPacket;
+//CombinedIOPacket    combinedIOPacket;
+//GPSPacket   gpsPacket;
 // ESP-NOW
 #define MAX_PEERS 20 // ESP-NOW peer limit
 int peerCnt = 0;
@@ -116,7 +117,7 @@ TaskHandle_t imuReceiveTask;
 TaskHandle_t combinedReceiveTask;
 TaskHandle_t timeStampSendTask;
 TaskHandle_t timeStampReceiveTask;
-
+uint8_t localAddr[6];
 void setup()
 {
   Serial.begin(115200);
@@ -138,6 +139,7 @@ void setup()
   Serial.println();
   // This is the mac address of this device
   Serial.print("YamuraLog Hub ");Serial.println(WiFi.macAddress());
+  WiFi.macAddress(localAddr);
   while(!InitializeSD())
   {
     #ifdef PRINT_DEBUG
@@ -387,7 +389,13 @@ void SendLoggingChange(LogState newState)
     return;
   }
   isLogging = newState;
-  char msgType = isLogging == LogState::ON ? LOGGING_BEGIN : LOGGING_END;
+
+  TimeStampPacket logStateBroadcast;
+  logStateBroadcast.packet.msgType = isLogging == LogState::ON ? LOGGING_BEGIN : LOGGING_END;
+  logStateBroadcast.packet.timeStamp = micros();
+  memcpy(&logStateBroadcast.packet.macAddr, localAddr, 6);
+
+
   // logging started
   if(isLogging == LogState::ON)
   {
@@ -430,20 +438,23 @@ void SendLoggingChange(LogState newState)
     #endif
     FindNextSDFile();    
   }
-  uint8_t result = esp_now_send(0, (const uint8_t*)&msgType, sizeof(msgType));
-  #ifdef PRINT_DEBUG
-  for(int peerIdx = 0; peerIdx < peerCnt; peerIdx++)
-  {
-    Serial.print("Send "); 
-    Serial.print(isLogging == LogState::ON ? "START LOGGING to " : "END LOGGING to ");
-    snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tLogging change\t%010ld\tResult\t%d\n",
-             micros(), 
-             peers[peerIdx].peer_addr[0], peers[peerIdx].peer_addr[1], peers[peerIdx].peer_addr[2], peers[peerIdx].peer_addr[3], peers[peerIdx].peer_addr[4], peers[peerIdx].peer_addr[5],
-             timeStampPacket.packet.timeStamp,
-             result);
-    Serial.print(msgOut);
-  }
-  #endif
+  xQueueSendToBack( timeStampSendQueue, &logStateBroadcast,0);// portMAX_DELAY );
+
+  //uint8_t result = esp_now_send(0, (const uint8_t*)&msgType, sizeof(msgType));
+  //#ifdef PRINT_DEBUG
+  //for(int peerIdx = 0; peerIdx < peerCnt; peerIdx++)
+  //{
+  //  xQueueSendToBack( timeStampSendQueue, &timeStampBroadcast,0);// portMAX_DELAY );
+  //  Serial.print("Send "); 
+  //  Serial.print(isLogging == LogState::ON ? "START LOGGING to " : "END LOGGING to ");
+  //  snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tLogging change\t%010ld\tResult\t%d\n",
+  //           micros(), 
+  //           peers[peerIdx].peer_addr[0], peers[peerIdx].peer_addr[1], peers[peerIdx].peer_addr[2], peers[peerIdx].peer_addr[3], peers[peerIdx].peer_addr[4], peers[peerIdx].peer_addr[5],
+  //           timeStampPacket.packet.timeStamp,
+  //           result);
+  //  Serial.print(msgOut);
+  //}
+  //#endif
 }
 //
 // send current logging state to out-of-phase leaf
@@ -452,16 +463,23 @@ void SendLoggingChange(LogState newState)
 void SendLoggingState(const uint8_t *macAddr)
 {
   AddPeer(macAddr);
-  char msgType = isLogging == LogState::ON ? LOGGING_BEGIN : LOGGING_END;
-  uint8_t result = esp_now_send(macAddr, (const uint8_t*)&msgType, sizeof(msgType));
-  #ifdef PRINT_DEBUG
-  Serial.print("Send current hub logging state "); 
-  Serial.print(isLogging == LogState::ON ? "LOGGING to " : "IDLE to ");
-  snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tresult\t%d\n",
-           micros(), 
-           macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5], result);
-  Serial.print(msgOut);
-  #endif
+
+  TimeStampPacket logStateBroadcast;
+  logStateBroadcast.packet.msgType = isLogging == LogState::ON ? LOGGING_BEGIN : LOGGING_END;
+  logStateBroadcast.packet.timeStamp = micros();
+  memcpy(&logStateBroadcast.packet.macAddr, localAddr, 6);
+  xQueueSendToBack( timeStampSendQueue, &logStateBroadcast,0);// portMAX_DELAY );
+
+  //char msgType = isLogging == LogState::ON ? LOGGING_BEGIN : LOGGING_END;
+  //uint8_t result = esp_now_send(macAddr, (const uint8_t*)&msgType, sizeof(msgType));
+  //#ifdef PRINT_DEBUG
+  //Serial.print("Send current hub logging state "); 
+  //Serial.print(isLogging == LogState::ON ? "LOGGING to " : "IDLE to ");
+  //snprintf(msgOut, sizeof(msgOut), "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tresult\t%d\n",
+  //         micros(), 
+  //         macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5], result);
+  //Serial.print(msgOut);
+  //#endif
 }
 //
 // callback when data is sent
@@ -588,21 +606,26 @@ void AddPeer(const uint8_t* mac_addr)
 void BroadcastTimestamp()
 {
   // setup timestamp
-  uint8_t result;
-  timeStampPacket.packet.msgType = TIMESTAMP_TYPE;
-  timeStampPacket.packet.timeStamp = micros();
-  // send to all known peers
-  result = esp_now_send(0, &timeStampPacket.dataBytes[0], sizeof(timeStampPacket));
-  #ifdef PRINT_DEBUG
-  for(int peerIdx = 0; peerIdx < peerCnt; peerIdx++)
-  {
-    sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tBroadcast timestamp\t%lu\n",
-             timeStampPacket.packet.timeStamp, 
-             peers[peerIdx].peer_addr[0], peers[peerIdx].peer_addr[1], peers[peerIdx].peer_addr[2], peers[peerIdx].peer_addr[3], peers[peerIdx].peer_addr[4], peers[peerIdx].peer_addr[5],
-             timeStampPacket.packet.timeStamp);
-    Serial.print(msgOut);
-  }
-  #endif
+   TimeStampPacket timeStampBroadcast;
+   timeStampBroadcast.packet.msgType = TIMESTAMP_TYPE;
+   timeStampBroadcast.packet.timeStamp = micros();
+   memcpy(&timeStampBroadcast.packet.macAddr, localAddr, 6);
+  xQueueSendToBack( timeStampSendQueue, &timeStampBroadcast,0);// portMAX_DELAY );
+  //uint8_t result;
+  //timeStampPacket.packet.msgType = TIMESTAMP_TYPE;
+  //timeStampPacket.packet.timeStamp = micros();
+  //// send to all known peers
+  //result = esp_now_send(0, &timeStampPacket.dataBytes[0], sizeof(timeStampPacket));
+  //#ifdef PRINT_DEBUG
+  //for(int peerIdx = 0; peerIdx < peerCnt; peerIdx++)
+  //{
+  // sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tBroadcast timestamp\t%lu\n",
+  //           timeStampPacket.packet.timeStamp, 
+  //           peers[peerIdx].peer_addr[0], peers[peerIdx].peer_addr[1], peers[peerIdx].peer_addr[2], peers[peerIdx].peer_addr[3], peers[peerIdx].peer_addr[4], peers[peerIdx].peer_addr[5],
+  //           timeStampPacket.packet.timeStamp);
+  //  Serial.print(msgOut);
+  //}
+  //#endif
 }
 //
 //
@@ -610,18 +633,24 @@ void BroadcastTimestamp()
 void BroadcastTimestamp(const uint8_t* mac_addr)
 {
   // setup timestamp
-  uint8_t result;
-  timeStampPacket.packet.msgType = TIMESTAMP_TYPE;
-  timeStampPacket.packet.timeStamp = micros();
+  TimeStampPacket timeStampBroadcast;
+  timeStampBroadcast.packet.msgType = TIMESTAMP_TYPE;
+  timeStampBroadcast.packet.timeStamp = micros();
+  memcpy(&timeStampBroadcast.packet.macAddr, localAddr, 6);
+
+  xQueueSendToBack( timeStampSendQueue, &timeStampBroadcast,0);// portMAX_DELAY );
+
+  //broadcastTimestamp.packet.timeStamp = micros();
+  //
   // send to all known peers
-  result = esp_now_send(mac_addr, &timeStampPacket.dataBytes[0], sizeof(timeStampPacket));
-  #ifdef PRINT_DEBUG
-  sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tBroadcast timestamp\t%lu\n",
-           timeStampPacket.packet.timeStamp, 
-           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
-           timeStampPacket.packet.timeStamp);
-  Serial.print(msgOut);
-  #endif
+  //result = esp_now_send(mac_addr, &timeStampPacket.dataBytes[0], sizeof(timeStampPacket));
+  //#ifdef PRINT_DEBUG
+  //sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tBroadcast timestamp\t%lu\n",
+  //         timeStampPacket.packet.timeStamp, 
+  //         mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
+  //         timeStampPacket.packet.timeStamp);
+  //Serial.print(msgOut);
+  //#endif
 }
 //
 // get next sequential log file name
@@ -832,38 +861,39 @@ unsigned long CloseFlash(const char * path)
   return len;
 }
 
-void ReceiveTimestampDataTask(void * pvParameters )
+// Task Handle           Task Function             Queue
+// ===================== ========================= ================= 
+// gpsReceiveTask        ReceiveGPSDataTask        gpsReceiveQueue;
+// imuReceiveTask        ReceiveIMUDataTask        imuReceiveQueue
+// combinedReceiveTask   ReceiveCombinedDataTask   combinedReceiveQueue
+// timeStampSendTask     ReceiveTimestampDataTask  timeStampReceiveQueue
+// timeStampReceiveTask  SendTimestampDataTask     timeStampSendQueue
+
+void ReceiveCombinedDataTask(void * pvParameters )
 {
   while(true)
   {
     vTaskDelay( pdMS_TO_TICKS( 10 ) );
-    if(uxQueueMessagesWaiting(timeStampReceiveQueue) == 0)
+    if(uxQueueMessagesWaiting(combinedReceiveQueue) == 0)
     {
       vTaskDelay( pdMS_TO_TICKS( 10 ) );
     }
     else
     {
-      TimeStampPacket timeStampReceived;
-      if (xQueueReceive( timeStampReceiveQueue, &timeStampReceived, pdMS_TO_TICKS( 10 ) ) == pdPASS)
+      CombinedIOPacket combinedReceived;
+      if (xQueueReceive( combinedReceiveQueue, &combinedReceived, pdMS_TO_TICKS( 10 ) ) == pdPASS)
       {
-        Serial.print("Message received from TIMESTAMP RECEIVE queue - queue has ");
-        Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+        Serial.print("Message received from A2D/D RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(combinedReceiveQueue));Serial.println(" entries");
       }
       else
       {
-        Serial.println("Error unloading data from TIMESTAMP RECEIVE queue - queue has ");
-        Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+        Serial.println("Error unloading data from A2D/D RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(combinedReceiveQueue));Serial.println(" entries");
       }
     }
   }
 }
-// Task Handle           Task Function             Queue
-// ===================== ========================= ================= 
-// gpsReceiveTask        ReceiveGPSDataTask        gpsReceiveQueue;
-// imuReceiveTask        ReceiveGPSDataTask        imuReceiveQueue
-// combinedReceiveTask   ReceiveCombinedDataTask   combinedReceiveQueue
-// timeStampSendTask     ReceiveTimestampDataTask  timeStampReceiveQueue
-// timeStampReceiveTask  SendTimestampDataTask     timeStampSendQueue
 void ReceiveGPSDataTask(void * pvParameters )
 {
   while(true)
@@ -879,12 +909,37 @@ void ReceiveGPSDataTask(void * pvParameters )
       if (xQueueReceive( gpsReceiveQueue, &gpsReceived, pdMS_TO_TICKS( 10 ) ) == pdPASS)
       {
         Serial.print("Message received from GPS RECEIVE queue - queue has ");
-        Serial.print(uxQueueMessagesWaiting(GPSReceiveQueue));Serial.println(" entries");
+        Serial.print(uxQueueMessagesWaiting(gpsReceiveQueue));Serial.println(" entries");
       }
       else
       {
-        Serial.println("Error unloading data from TIMESTAMP RECEIVE queue - queue has ");
-        Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+        Serial.println("Error unloading data from GPS RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(gpsReceiveQueue));Serial.println(" entries");
+      }
+    }
+  }
+}
+void ReceiveIMUDataTask(void * pvParameters )
+{
+  while(true)
+  {
+    vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    if(uxQueueMessagesWaiting(imuReceiveQueue) == 0)
+    {
+      vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    }
+    else
+    {
+      IMUPacket imuReceived;
+      if (xQueueReceive( imuReceiveQueue, &imuReceived, pdMS_TO_TICKS( 10 ) ) == pdPASS)
+      {
+        Serial.print("Message received from IMU RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(imuReceiveQueue));Serial.println(" entries");
+      }
+      else
+      {
+        Serial.println("Error unloading data from IMU RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(imuReceiveQueue));Serial.println(" entries");
       }
     }
   }
@@ -905,11 +960,42 @@ void ReceiveTimestampDataTask(void * pvParameters )
       {
         Serial.print("Message received from TIMESTAMP RECEIVE queue - queue has ");
         Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+        PrintTimestamp(micros(), timeStampReceived);
       }
       else
       {
         Serial.println("Error unloading data from TIMESTAMP RECEIVE queue - queue has ");
         Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+      }
+    }
+  }
+}
+void SendTimestampDataTask(void * pvParameters )
+{
+  while(true)
+  {
+    vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    if(uxQueueMessagesWaiting(timeStampSendQueue) == 0)
+    {
+      vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    }
+    else
+    {
+      TimeStampPacket timeStampToSend;
+      if (xQueueReceive( timeStampSendQueue, &timeStampToSend, pdMS_TO_TICKS( 10 ) ) == pdPASS)
+      {
+        uint8_t result = esp_now_send(0, &timeStampToSend.dataBytes[0], sizeof(TimeStampPacket));
+
+        Serial.print("Send from TIMESTAMP SEND queue, ");
+        Serial.print(uxQueueMessagesWaiting(timeStampSendQueue));Serial.print(" entries, result ");
+        Serial.print(result);
+        Serial.print(" ");
+        PrintTimestamp(micros(), timeStampToSend);
+      }
+      else
+      {
+        Serial.println("Error unloading data from TIMESTAMP SEND queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(timeStampSendQueue));Serial.println(" entries");
       }
     }
   }
