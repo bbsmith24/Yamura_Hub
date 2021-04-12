@@ -4,6 +4,9 @@
 // receive data from leafs, write to memory/sd card, etc
 // upload file to PC for analysis
 //
+// build for Sparkfun ESP32 Thing Plus, large SPIFFS
+// this should make about 8MB available for current log flash store
+//
 #include <esp_now.h>
 #include <WiFi.h>
 #include "FS.h"
@@ -102,6 +105,18 @@ char msgOut[256];
 // max data packet size os 250 bytes
 uint8_t dataBytes[250];
 
+xQueueHandle  gpsReceiveQueue;
+xQueueHandle  imuReceiveQueue;
+xQueueHandle  combinedReceiveQueue;
+xQueueHandle  timeStampSendQueue;
+xQueueHandle  timeStampReceiveQueue;
+
+TaskHandle_t gpsReceiveTask;
+TaskHandle_t imuReceiveTask;
+TaskHandle_t combinedReceiveTask;
+TaskHandle_t timeStampSendTask;
+TaskHandle_t timeStampReceiveTask;
+
 void setup()
 {
   Serial.begin(115200);
@@ -141,9 +156,6 @@ void setup()
   FindNextSDFile();
   // init EPS-NOW
   InitESPNow();
-  // register for send and receive callback functions
-  esp_now_register_send_cb(OnDataSent);
-  esp_now_register_recv_cb(OnDataRecv);
   // initialize uSD card
   // not initially logging
   isLogging = LogState::UNDEFINED;
@@ -151,9 +163,114 @@ void setup()
   logBtnDebounceStart = 0;
   lastBroadcastTime = micros();
 
+  // create a queue for received sensor readings and timestamps
+  // queue for timestamps to send
+  // xQueueHandle  gpsReceiveQueue;
+  // xQueueHandle  imuReceiveQueue;
+  // xQueueHandle  combinedReceiveQueue;
+  // xQueueHandle  timeStampSendQueue;
+  // xQueueHandle  timeStampReceiveQueue;
+  gpsReceiveQueue = xQueueCreate(100, sizeof(GPSPacket));
+  if(gpsReceiveQueue == 0)
+  {
+    Serial.println("Error creating gpsReceiveQueue");
+    while(true) {}
+  } 
+  Serial.println("Created gpsReceiveQueue");
+  //
+  imuReceiveQueue = xQueueCreate(100, sizeof(IMUPacket));
+  if(gpsReceiveQueue == 0)
+  {
+    Serial.println("Error creating imuReceiveQueue");
+    while(true) {}
+  } 
+  Serial.println("Created imuReceiveQueue");
+  //
+  combinedReceiveQueue = xQueueCreate(100, sizeof(CombinedIOPacket));
+  if(gpsReceiveQueue == 0)
+  {
+    Serial.println("Error creating combinedReceiveQueue");
+    while(true) {}
+  } 
+  Serial.println("Created combinedReceiveQueue");
+  //
+  timeStampReceiveQueue = xQueueCreate(100, sizeof(TimeStampPacket));
+  if(timeStampReceiveQueue == 0)
+  {
+    Serial.println("Error creating timeStampReceiveQueue");
+    while(true) {}
+  }
+   Serial.println("Created timeStampReceiveQueueeue");
+  // create a queue for timestamps to send send function pulls messages to send to leaves from here
+  timeStampSendQueue = xQueueCreate(100, sizeof(TimeStampPacket));
+  if(timeStampSendQueue == 0)
+  {
+    Serial.println("Error creating timeStampSendQueue");
+    while(true) {}
+  }
+  Serial.println("Created timeStampSendQueue");
+  // 
+  // TaskHandle_t gpsReceiveTask;
+  // TaskHandle_t imuReceiveTask;
+  // TaskHandle_t combinedReceiveTask;
+  // TaskHandle_t timeStampSendTask;
+  // TaskHandle_t timeStampReceiveTask;
+  xTaskCreatePinnedToCore(
+              ReceiveGPSDataTask, 
+              "ReceiveGPS", 
+              10000, 
+              NULL,
+              0,
+              &gpsReceiveTask,
+              0);
+  Serial.println("Created ReceiveGPSDataTask");
+  //
+  xTaskCreatePinnedToCore(
+              ReceiveIMUDataTask, 
+              "ReceiveIMU", 
+              10000, 
+              NULL,
+              0,
+              &imuReceiveTask,
+              0);
+  Serial.println("Created ReceiveIMUDataTask");
+  //
+  xTaskCreatePinnedToCore(
+              ReceiveCombinedDataTask, 
+              "ReceiveCombined", 
+              10000, 
+              NULL,
+              0,
+              &combinedReceiveTask,
+              0);
+  Serial.println("Created ReceiveCombinedDataTask");
+  //
+  xTaskCreatePinnedToCore(
+              ReceiveTimestampDataTask,
+              "ReceiveTimestamp", 
+              10000, 
+              NULL,
+              0,
+              &timeStampReceiveTask,
+              0);
+  Serial.println("Created ReceiveTimestampDataTask");
+  //
+  xTaskCreatePinnedToCore(
+              SendTimestampDataTask,    // function
+              "SendTimestamp",          // name
+              10000,                    // stack size
+              NULL,                     // parameter passed
+              0,                        // priority 0=low
+              &timeStampSendTask,       // task handle
+              0);                       // core
+  Serial.println("Created SendTimestampDataTask");
+  // register for send and receive callback functions - must do this after queues are defined
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
+  //
   Serial.println("Running");
   logBtnDebounceStart = millis();
- }
+}
 
 void loop() 
 {
@@ -275,10 +392,12 @@ void SendLoggingChange(LogState newState)
   if(isLogging == LogState::ON)
   {
     // open or create file - truncate existing file.
-    if(!OpenFlash(nextLogName))
+    //if(!OpenFlash(nextLogName))
+    if(!OpenSD(nextLogName))
     {
       #ifdef PRINT_DEBUG
-      Serial.print("Failed to open Flash file ");
+      //Serial.print("Failed to open Flash file ");
+      Serial.print("Failed to open SD file ");
       Serial.print(nextLogName);
       Serial.println(", logging halted");
       #endif
@@ -295,18 +414,19 @@ void SendLoggingChange(LogState newState)
   else
   {
     // close current file
-    double s = CloseFlash(nextLogName);
+    //double s = CloseFlash(nextLogName);
+    logFileSD.close();
     // find next file
     #ifdef PRINT_DEBUG
     Serial.print(micros());
     Serial.print(" END logging to file ");
     Serial.print(nextLogName);
-    Serial.print(" (");
-    Serial.print(s);
-    Serial.print(") bytes");
+    //Serial.print(" (");
+    //Serial.print(s);
+    //Serial.print(") bytes");
     Serial.println();
-    CopyFlashToSD(nextLogName);
-    DeleteFlash(nextLogName);
+    //CopyFlashToSD(nextLogName);
+    //DeleteFlash(nextLogName);
     #endif
     FindNextSDFile();    
   }
@@ -363,55 +483,40 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 //
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
 {
-  if(isLogging == LogState::ON)
+  // QUEUE                 PACKET           ID Char
+  // ===================== ================ =======================================================
+  // gpsReceiveQueue       GPSPacket        GPS_LEAFTYPE
+  // imuReceiveQueue       IMUPacket        IMU_LEAFTYPE
+  // combinedReceiveQueue  CombinedIOPacket COMBINEDIO_LEAFTYPE
+  // timeStampReceiveQueue TimeStampPacket  LOGGING_BEGIN LOGGING_END TIMESTAMP_TYPE HEARTBEAT_TYPE
+  // 
+  if(((data[0] == TIMESTAMP_TYPE) || (data[0] == HEARTBEAT_TYPE)) && (data_len == sizeof(TimeStampPacket)))
   {
-    // timestamp request or heartbeat received while hub logging on - send start logging to leaf
-    if((data[0] == TIMESTAMP_TYPE) ||
-       (data[0] == HEARTBEAT_TYPE))
-    {
-      SendLoggingState(mac_addr);        
-    }
-    // store sensor data
-    else
-    {
-      WriteFlash(data, data_len);
-    }
+    xQueueSendToBack( timeStampReceiveQueue, data, 0);
+    Serial.print("Added TIMESTAMP to TIMESTAMP RECEIVE queue - queue has "); 
+    Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
   }
-  // data received while logging is off
-  else
+  if((data[0] == IMU_LEAFTYPE) && (data_len == sizeof(IMUPacket)))
   {
-    // timestamp request or heartbeat 
-    if(data[0] == TIMESTAMP_TYPE)
-    {
-      memcpy(&timeStampPacket, data, data_len);
-      sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tTIMESTAMP REQt%010lu\n",
-           micros(), 
-           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
-           timeStampPacket.packet.timeStamp);
-      Serial.print(msgOut);
-      AddPeer(mac_addr);
-      BroadcastTimestamp(mac_addr);
-    }
-    else if (data[0] == HEARTBEAT_TYPE)
-    {
-      memcpy(&timeStampPacket, data, data_len);
-      sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\tHEARTBEAT\t%010lu\n",
-           micros(), 
-           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
-           timeStampPacket.packet.timeStamp);
-      Serial.print(msgOut);
-      AddPeer(mac_addr);
-    }
-    // data received while hub logging off - send stop logging to leaf    
-    else
-    {
-      sprintf(msgOut, "%010lu\t%02X:%02X:%02X:%02X:%02X:%02X\t%c\n",
-           micros(), 
-           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
-           (char)data[0]);
-      Serial.print(msgOut);
-      SendLoggingState(mac_addr);        
-    }
+    xQueueSendToBack( imuReceiveQueue, data, 0);
+    Serial.print("Added IMU to IMU RECEIVE queue - queue has "); 
+    Serial.print(uxQueueMessagesWaiting(imuReceiveQueue));Serial.println(" entries");
+  }
+  if((data[0] == GPS_LEAFTYPE) && (data_len == sizeof(GPSPacket)))
+  {
+    xQueueSendToBack( imuReceiveQueue, data, 0);
+    Serial.print("Added GPS to GPS RECEIVE queue - queue has "); 
+    Serial.print(uxQueueMessagesWaiting(gpsReceiveQueue));Serial.println(" entries");
+  }
+  if((data[0] == COMBINEDIO_LEAFTYPE) && (data_len == sizeof(CombinedIOPacket)))
+  {
+    xQueueSendToBack( combinedReceiveQueue, data, 0);
+    Serial.print("Added Digital/A2D to Digital/A2D RECEIVE queue - queue has "); 
+    Serial.print(uxQueueMessagesWaiting(combinedReceiveQueue));Serial.println(" entries");
+  }
+  if(!isLogging)
+  {
+    AddPeer(mac_addr);
   }
 }
 //
@@ -540,6 +645,25 @@ void FindNextSDFile()
   Serial.println(nextLogName);
 }
 //
+//
+//
+bool OpenSD(const char * path)
+{
+  if (!logFileSD.open(path, O_RDWR | O_CREAT | O_TRUNC))
+  {
+      sd.errorHalt(&Serial, F("failed to open SD file for write"));
+      return false;
+  }
+  return true;
+}
+//
+// write to open flash file
+//
+int WriteSD(const uint8_t * msg, size_t msgSize)
+{
+  return logFileSD.write(msg, msgSize);
+}
+//
 // LittleFS (Flash) functions
 // 
 // 
@@ -547,15 +671,15 @@ void FindNextSDFile()
 //
 bool InitializeFlash()
 {
-  if(!LITTLEFS.begin(FORMAT_LITTLEFS_IF_FAILED))
+  if(!LITTLEFS.begin(FORMAT_LITTLEFS_IF_FAILED, "/lfs2"))
   {
       Serial.println("Flash mount Failed");
       return false;
   }
   Serial.println(F("\nFlash initialized"));
   Serial.print(F("\tAvailable "));
-  Serial.println(LITTLEFS.totalBytes()/1000.0, 3);
-  Serial.print(F("\tUsed "));
+  Serial.print(LITTLEFS.totalBytes()/1000.0, 3);
+  Serial.print(F("KB\tUsed "));
   Serial.print(LITTLEFS.usedBytes()/1000.0, 3);
   Serial.println(F("KB"));
   int levels = 4;
@@ -655,7 +779,7 @@ void DeleteFlash(const char * path)
 //
 void CopyFlashToSD(const char * path)
 {
-  Serial.printf("Copy file: %s from FLASH to SD ", path);
+//  Serial.printf("Copy file: %s from FLASH to SD ", path);
 
   flashFile = LITTLEFS.open(path);
   if(!flashFile || flashFile.isDirectory()){
@@ -679,13 +803,12 @@ void CopyFlashToSD(const char * path)
     }
     flashFile.read(buf, toRead);
     logFileSD.write(buf, toRead);
-    Serial.print(".\r");
     len -= toRead;
   }
   flashFile.close();  
   logFileSD.close();
   Serial.println();
-  Serial.printf("Done! file: %s copied from FLASH to SD\n", path);
+  Serial.printf("Copied %s from FLASH to SD\n", path);
 }
 //
 //
@@ -695,7 +818,7 @@ bool OpenFlash(const char * path)
   flashFile = LITTLEFS.open(path, FILE_WRITE);
   if(!flashFile)
   {
-      Serial.println("- failed to open file for writing");
+      Serial.println("failed to open flash file for writing");
       return false;
   }
   return true;
@@ -707,4 +830,87 @@ unsigned long CloseFlash(const char * path)
   unsigned long len = flashFile.size();
   flashFile.close();
   return len;
+}
+
+void ReceiveTimestampDataTask(void * pvParameters )
+{
+  while(true)
+  {
+    vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    if(uxQueueMessagesWaiting(timeStampReceiveQueue) == 0)
+    {
+      vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    }
+    else
+    {
+      TimeStampPacket timeStampReceived;
+      if (xQueueReceive( timeStampReceiveQueue, &timeStampReceived, pdMS_TO_TICKS( 10 ) ) == pdPASS)
+      {
+        Serial.print("Message received from TIMESTAMP RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+      }
+      else
+      {
+        Serial.println("Error unloading data from TIMESTAMP RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+      }
+    }
+  }
+}
+// Task Handle           Task Function             Queue
+// ===================== ========================= ================= 
+// gpsReceiveTask        ReceiveGPSDataTask        gpsReceiveQueue;
+// imuReceiveTask        ReceiveGPSDataTask        imuReceiveQueue
+// combinedReceiveTask   ReceiveCombinedDataTask   combinedReceiveQueue
+// timeStampSendTask     ReceiveTimestampDataTask  timeStampReceiveQueue
+// timeStampReceiveTask  SendTimestampDataTask     timeStampSendQueue
+void ReceiveGPSDataTask(void * pvParameters )
+{
+  while(true)
+  {
+    vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    if(uxQueueMessagesWaiting(gpsReceiveQueue) == 0)
+    {
+      vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    }
+    else
+    {
+      GPSPacket gpsReceived;
+      if (xQueueReceive( gpsReceiveQueue, &gpsReceived, pdMS_TO_TICKS( 10 ) ) == pdPASS)
+      {
+        Serial.print("Message received from GPS RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(GPSReceiveQueue));Serial.println(" entries");
+      }
+      else
+      {
+        Serial.println("Error unloading data from TIMESTAMP RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+      }
+    }
+  }
+}
+void ReceiveTimestampDataTask(void * pvParameters )
+{
+  while(true)
+  {
+    vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    if(uxQueueMessagesWaiting(timeStampReceiveQueue) == 0)
+    {
+      vTaskDelay( pdMS_TO_TICKS( 10 ) );
+    }
+    else
+    {
+      TimeStampPacket timeStampReceived;
+      if (xQueueReceive( timeStampReceiveQueue, &timeStampReceived, pdMS_TO_TICKS( 10 ) ) == pdPASS)
+      {
+        Serial.print("Message received from TIMESTAMP RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+      }
+      else
+      {
+        Serial.println("Error unloading data from TIMESTAMP RECEIVE queue - queue has ");
+        Serial.print(uxQueueMessagesWaiting(timeStampReceiveQueue));Serial.println(" entries");
+      }
+    }
+  }
 }
